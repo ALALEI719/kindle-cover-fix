@@ -1,0 +1,5 @@
+ebooklib>=0.18
+mobi>=0.3
+mobi-header>=0.0.4
+Pillow>=10.0
+requests>=2.28
