@@ -17,7 +17,8 @@ output/
 .vscode/
 *.swp
 
-# 临时文件
+# 本地 Send to Kindle 配置（含 SMTP 密码，勿上传）
+.config/
 *.bak
 *.tmp
 _probe.jpg

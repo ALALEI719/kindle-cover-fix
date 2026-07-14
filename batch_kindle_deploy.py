@@ -8,49 +8,26 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import quote
-
-import requests
 
 # 项目根目录
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 from kindle_cover_fix import (  # noqa: E402
-    BOOK_EXTENSIONS,
     extract_metadata_calibre,
-    fetch_cover_amazon,
     fix_book,
     is_book_file,
 )
+from asin_lookup import ASIN_OVERRIDES, lookup_asin_for_book, verify_asin_cover  # noqa: E402
 
 KINDLE_DOCS = Path("/Volumes/Kindle/documents")
 CUTOFF = datetime(2025, 12, 5)
 
 DICT_PATTERNS = re.compile(r"(dictionary|词典|dict\b|kindledict)", re.I)
 SKIP_PATTERNS = re.compile(r"(Tender_EBOK|RETEST|_fixed\b)", re.I)
-ASIN_RE = re.compile(r"/(?:dp|gp/product)/([A-Z0-9]{10})")
-
-# 亚马逊搜索被反爬时，用手动 ASIN 映射（按文件名关键词匹配）
-ASIN_OVERRIDES: list[tuple[re.Pattern[str], str]] = [
-    # 更具体的模式放前面，避免 5 册套装文件名含 "A Clash of Kings" 被误匹配
-    (re.compile(r"A Game of Thrones 5-Book Bundle", re.I), "B00957T6X6"),
-    (re.compile(r"A Clash of Kings", re.I), "B000FC1HBY"),
-    (re.compile(r"Introducing Game Theory", re.I), "B01J4P6L90"),
-    (re.compile(r"No More Tears", re.I), "B0D93KNGS1"),
-    (re.compile(r"Nuclear War", re.I), "B0CBGWMFSN"),
-    (re.compile(r"Recursion.*Blake Crouch|Recursion \(Blake", re.I), "B07HDSHP7N"),
-    (re.compile(r"That will never work", re.I), "B07QLL7N7D"),
-    (re.compile(r"5 Types of Wealth", re.I), "B0D8N2B4KC"),
-    (re.compile(r"Disease Delusion", re.I), "B00FJ37DEO"),
-    (re.compile(r"Psychology of Money", re.I), "B084HJSJJ2"),
-    (re.compile(r"法治的细节", re.I), "B09L12881X"),
-    (re.compile(r"耶路撒冷三千年", re.I), "B004LROX8S"),
-]
 
 
 def is_dictionary(path: Path) -> bool:
@@ -78,61 +55,6 @@ def eligible_files(docs: Path) -> list[Path]:
     return files
 
 
-def search_amazon_asin(title: str, authors: list[str]) -> str | None:
-    clean_title = re.sub(r"\s*\([^)]*z-library[^)]*\)", "", title, flags=re.I).strip()
-    clean_title = re.sub(r"\s*\(Z-Library\)", "", clean_title, flags=re.I).strip()
-    author = authors[0] if authors else ""
-    queries = [
-        f"{clean_title} {author}".strip(),
-        clean_title,
-    ]
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-        "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8",
-    }
-    hosts = ["https://www.amazon.com", "https://www.amazon.cn"]
-    for host in hosts:
-        for q in queries:
-            if not q:
-                continue
-            url = f"{host}/s?" + f"k={quote(q)}&i=digital-text"
-            try:
-                resp = requests.get(url, headers=headers, timeout=20)
-                resp.raise_for_status()
-                for asin in ASIN_RE.findall(resp.text):
-                    if asin.startswith("B"):
-                        return asin
-            except Exception:
-                continue
-    return None
-
-
-def is_amazon_asin(value: str) -> bool:
-    value = value.upper().strip()
-    return bool(re.fullmatch(r"[A-Z0-9]{10}", value)) and value.startswith("B")
-
-
-def lookup_asin_override(path: Path, title: str) -> str | None:
-    for pattern, asin in ASIN_OVERRIDES:
-        if pattern.search(path.name) or pattern.search(title):
-            return asin
-    return None
-
-
-def resolve_asin(path: Path, title: str, authors: list[str], ids_line: str) -> str | None:
-    override = lookup_asin_override(path, title)
-    if override:
-        return override
-    for part in re.split(r",\s*", ids_line):
-        m = re.search(r"asin:([A-Z0-9]{10})", part, re.I)
-        if m and is_amazon_asin(m.group(1)):
-            return m.group(1).upper()
-    asin = search_amazon_asin(title, authors)
-    if asin:
-        return asin
-    return None
-
-
 def setup_dirs(backup_dir: Path | None) -> tuple[Path, Path, Path, Path]:
     if backup_dir is None:
         base = ROOT / "output" / "kindle-batch-backup"
@@ -147,14 +69,6 @@ def setup_dirs(backup_dir: Path | None) -> tuple[Path, Path, Path, Path]:
     originals.mkdir(parents=True, exist_ok=True)
     fixed.mkdir(parents=True, exist_ok=True)
     return backup_dir, fixed, originals, report
-
-
-def verify_asin_cover(asin: str, backup_dir: Path) -> bool:
-    tmp = backup_dir / "_probe.jpg"
-    try:
-        return fetch_cover_amazon(asin, tmp)
-    finally:
-        tmp.unlink(missing_ok=True)
 
 
 def main() -> int:
@@ -224,18 +138,10 @@ def main() -> int:
             continue
 
         title, authors = extract_metadata_calibre(backup_path)
-        ids_line = ""
-        meta = subprocess.run(
-            ["/Applications/calibre.app/Contents/MacOS/ebook-meta", str(backup_path)],
-            capture_output=True,
-            text=True,
-        )
-        for line in meta.stdout.splitlines():
-            if line.startswith("Identifiers"):
-                ids_line = line.split(":", 1)[-1].strip()
+        lookup = lookup_asin_for_book(backup_path, verify_cover=True)
+        asin = lookup.asin
 
         print(f"\n处理：{backup_path.name}")
-        asin = resolve_asin(backup_path, title, authors, ids_line)
         if not asin:
             report["failed"].append({"file": backup_path.name, "reason": "未找到亚马逊 ASIN"})
             print("  ✗ 未找到 ASIN，保留备份，不部署")
