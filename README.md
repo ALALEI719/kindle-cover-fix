@@ -132,9 +132,10 @@ python3 batch_kindle_deploy.py
 2. 下载官方封面：`https://m.media-amazon.com/images/P/{ASIN}.01.MAIN._SCRM_.jpg`
 3. Calibre 嵌入封面
 4. 元数据设为 **EBOK** + ASIN（**不要** 改为 PDOC，会导致封面不显示）
-5. 修复后强制验证（格式、ASIN、封面、CoverOffset）
-6. USB 复制到 `documents`，并清理旧 `.sdr` 缓存
-7. 运行书伴工具修复 `system/thumbnails` 缩略图
+5. 转换时启用 **Kindle 排版优化**（左对齐、嵌入字体、修复 small-caps 间距）
+6. 修复后强制验证（格式、ASIN、封面、CoverOffset）
+7. USB 复制到 `documents`，并清理旧 `.sdr` 缓存
+8. 运行书伴工具修复 `system/thumbnails` 缩略图
 
 修复后：
 
@@ -169,6 +170,8 @@ https://www.amazon.com/dp/B07HDSHP7N
 **修复后仍无封面？** 确认使用 `process --deploy` 标准流程；Wi-Fi 已开、ASIN 正确；读几页后重启 Kindle。检查是否误用了 PDOC。
 
 **EPUB 能直接放进 Kindle 吗？** 不能。请用 `process` 命令转为 AZW3 并修复后再部署。
+
+**排版错乱、字间距很大？** 新版已默认启用 Kindle 排版优化（左对齐 + 嵌入字体 + 修复 small-caps）。请用 `process --deploy` 重新转换。
 
 **会改原文件吗？** 使用 `--output` 时原文件不动；`batch_kindle_deploy.py` 会把旧文件剪切到 `output/kindle-batch-backup/`。
 

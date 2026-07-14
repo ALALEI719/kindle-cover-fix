@@ -483,12 +483,38 @@ def apply_cover_calibre(path: Path, cover: Path) -> None:
     run_cmd([str(ebook_meta), str(path), "--cover", str(cover)])
 
 
+KINDLE_TYPOGRAPHY_EXTRA_CSS = (
+    "p, .indent { text-align: left !important; word-spacing: normal !important; "
+    "letter-spacing: normal !important; } "
+    ".fv-allsmallcaps, .fv-smallcaps, .smallcaps { font-variant: normal !important; "
+    "text-transform: none !important; font-size: inherit !important; }"
+)
+
+
+def calibre_kindle_typography_args() -> list[str]:
+    """Kindle 排版优化：避免两端对齐大间距、small-caps 乱码、字体缩放失真。"""
+    return [
+        "--embed-all-fonts",
+        "--disable-font-rescaling",
+        "--change-justification=left",
+        "--minimum-line-height",
+        "120",
+        "--margin-left=-1",
+        "--margin-right=-1",
+        "--margin-top=-1",
+        "--margin-bottom=-1",
+        "--extra-css",
+        KINDLE_TYPOGRAPHY_EXTRA_CSS,
+    ]
+
+
 def convert_with_calibre(
     src: Path,
     dest: Path,
     *,
     cover: Optional[Path] = None,
     share_not_sync: bool = True,
+    kindle_typography: Optional[bool] = None,
 ) -> None:
     ebook_convert = find_calibre_tool("ebook-convert")
     if not ebook_convert:
@@ -498,6 +524,10 @@ def convert_with_calibre(
         cmd.append("--share-not-sync")
     if cover and cover.exists():
         cmd.extend(["--cover", str(cover)])
+    if kindle_typography is None:
+        kindle_typography = dest.suffix.lower() == ".azw3" and src.suffix.lower() in {".epub", ".mobi", ".azw"}
+    if kindle_typography:
+        cmd.extend(calibre_kindle_typography_args())
     run_cmd(cmd)
 
 
