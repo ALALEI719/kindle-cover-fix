@@ -17,9 +17,11 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 from kindle_cover_fix import (  # noqa: E402
+    deploy_to_kindle,
     extract_metadata_calibre,
     fix_book,
     is_book_file,
+    validate_bookfere_output,
 )
 from asin_lookup import ASIN_OVERRIDES, lookup_asin_for_book, verify_asin_cover  # noqa: E402
 
@@ -160,21 +162,22 @@ def main() -> int:
                 output_dir=FIXED_DIR,
                 backup=False,
             )
-            # 确保文件名与原始一致
-            final_path = FIXED_DIR / backup_path.name
-            if fixed.name != backup_path.name:
+            # 确保输出为 AZW3 且文件名 stem 与原始一致
+            final_path = FIXED_DIR / f"{backup_path.stem}.azw3"
+            if fixed.resolve() != final_path.resolve():
                 if final_path.exists():
                     final_path.unlink()
                 fixed.rename(final_path)
                 fixed = final_path
 
-            # 3) 部署到 Kindle
-            deploy = KINDLE_DOCS / backup_path.name
-            shutil.copy2(fixed, deploy)
+            validate_bookfere_output(fixed, asin=asin)
+
+            # 3) 部署到 Kindle（含 .sdr 清理与缩略图修复）
+            deploy = deploy_to_kindle(fixed, kindle_docs=KINDLE_DOCS)
             report["processed"].append(
                 {"file": backup_path.name, "asin": asin, "title": title, "deployed": str(deploy)}
             )
-            print(f"  ✓ 完成 ASIN={asin} → 已复制到 Kindle")
+            print(f"  ✓ 完成 ASIN={asin} → 已部署到 Kindle")
         except Exception as exc:
             report["failed"].append({"file": backup_path.name, "reason": str(exc)})
             print(f"  ✗ 失败：{exc}")

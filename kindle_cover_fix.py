@@ -12,11 +12,10 @@ Kindle 书籍封面修复工具
 - 锁屏封面：非商店购买的书可能被亚马逊服务器端限制
 
 用法示例：
+  python3 kindle_cover_fix.py process book.epub --auto-asin --deploy
   python3 kindle_cover_fix.py scan ~/Downloads
-  python3 kindle_cover_fix.py fix book.mobi --for-screensaver
-  python3 kindle_cover_fix.py fix book.mobi --bookfere-ebok --asin B000FC0VBQ
+  python3 kindle_cover_fix.py fix book.azw3 --bookfere-ebok --asin B000FC0VBQ --deploy
   python3 kindle_cover_fix.py recover /Volumes/Kindle
-  python3 kindle_cover_fix.py fix-all "/Volumes/Kindle/documents" --fetch-covers
 """
 
 from __future__ import annotations
@@ -41,6 +40,8 @@ from PIL import Image
 BOOK_EXTENSIONS = {".mobi", ".azw", ".azw3", ".epub", ".kfx"}
 BOOKFERE_FIX_ROOT = Path(__file__).resolve().parent / "vendor" / "Fix-Kindle-Ebook-Cover"
 CALIBRE_BIN_DIR = Path("/Applications/calibre.app/Contents/MacOS")
+KINDLE_ROOT = Path("/Volumes/Kindle")
+KINDLE_DOCS = KINDLE_ROOT / "documents"
 EXTH_COVER_OFFSET = 201
 EXTH_THUMB_OFFSET = 202
 EXTH_ASIN = 113
@@ -61,6 +62,7 @@ class BookInfo:
     cde_type: Optional[str] = None
     issues: list[str] = field(default_factory=list)
     screensaver_ready: bool = False
+    bookfere_ready: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -75,6 +77,7 @@ class BookInfo:
             "cde_type": self.cde_type,
             "issues": self.issues,
             "screensaver_ready": self.screensaver_ready,
+            "bookfere_ready": self.bookfere_ready,
         }
 
 
@@ -168,23 +171,28 @@ def read_mobi_exth(path: Path) -> dict:
 
 
 def epub_has_cover(path: Path) -> bool:
+    """用 Calibre 检测 EPUB 封面（比 ebooklib 更可靠）。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        cover_path = Path(tmp) / "cover.jpg"
+        if extract_cover_calibre(path, cover_path):
+            return True
     try:
-        from ebooklib import epub
-        from ebooklib.epub import ITEM_COVER
-    except ImportError:
-        return False
-    try:
-        book = epub.read_epub(str(path))
+        import zipfile
+        with zipfile.ZipFile(path) as z:
+            return any("cover" in n.lower() and n.lower().endswith((".jpg", ".jpeg", ".png")) for n in z.namelist())
     except Exception:
         return False
-    for item in book.get_items():
-        if item.get_type() == ITEM_COVER:
-            return True
-    for _uid, meta in book.metadata.items():
-        for value in meta:
-            if getattr(value, "content", None):
-                return True
-    return False
+
+
+def _compute_bookfere_ready(info: BookInfo) -> bool:
+    """书伴 EBOK 方案就绪：AZW3 + EBOK + ASIN + 嵌入封面 + CoverOffset。"""
+    return (
+        info.format == "azw3"
+        and info.has_cover
+        and info.cde_type == "EBOK"
+        and bool(info.asin)
+        and info.cover_offset not in (None, INVALID_OFFSET)
+    )
 
 
 def analyze_book(path: Path) -> BookInfo:
@@ -215,9 +223,13 @@ def analyze_book(path: Path) -> BookInfo:
             info.issues.append("CoverOffset 已设置，但无法提取封面图")
 
         if not info.asin:
-            info.issues.append("缺少 ASIN（建议生成 UUID 作为唯一标识）")
-        if info.cde_type != "PDOC":
-            info.issues.append(f"cdeType={info.cde_type or '未知'}，侧载书籍建议改为 PDOC 以支持锁屏封面")
+            info.issues.append("缺少 ASIN（书伴方案需亚马逊真实 ASIN）")
+        if info.cde_type == "EBOK" and info.asin and info.has_cover:
+            pass  # 书伴标准方案，无需警告
+        elif info.cde_type == "PDOC" and info.asin and len(info.asin) == 10 and info.asin.startswith("B"):
+            info.issues.append("cdeType=PDOC 且含亚马逊 ASIN，建议改用 EBOK 书伴方案（--bookfere-ebok）")
+        elif info.cde_type not in ("EBOK", "PDOC"):
+            info.issues.append(f"cdeType={info.cde_type or '未知'}，建议使用 EBOK 书伴方案")
 
         if info.format == "mobi":
             info.issues.append("MOBI 格式在新款 Kindle 上锁屏封面支持较差，建议转为 AZW3")
@@ -225,17 +237,14 @@ def analyze_book(path: Path) -> BookInfo:
     elif info.format == "epub":
         info.has_cover = epub_has_cover(path)
         if not info.has_cover:
-            info.issues.append("EPUB 缺少封面元数据")
+            info.issues.append("EPUB 缺少封面（将转为 AZW3 并嵌入官方封面）")
+        else:
+            info.issues.append("EPUB 需转为 AZW3 才能在 Kindle 上显示封面")
     else:
         info.issues.append(f"暂不直接支持 {info.format} 格式")
 
-    info.screensaver_ready = (
-        info.has_cover
-        and info.format in {"azw3", "epub"}
-        and info.cde_type == "PDOC"
-        and bool(info.asin)
-        and not any("缺少嵌入封面" in x or "缺少封面" in x for x in info.issues)
-    )
+    info.bookfere_ready = _compute_bookfere_ready(info)
+    info.screensaver_ready = info.bookfere_ready
     return info
 
 
@@ -492,14 +501,117 @@ def convert_with_calibre(
     run_cmd(cmd)
 
 
-def set_epub_cover(path: Path, cover: Path) -> None:
-    from ebooklib import epub
+def set_epub_cover_safe(path: Path, cover: Path) -> None:
+    """通过 zip 解压替换封面，避免 ebooklib / ebook-meta 损坏 EPUB 内容。"""
+    import zipfile
 
-    book = epub.read_epub(str(path))
-    with cover.open("rb") as f:
-        cover_data = f.read()
-    book.set_cover("cover.jpg", cover_data)
-    epub.write_epub(str(path), book)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmpdir = Path(tmp)
+        with zipfile.ZipFile(path, "r") as zin:
+            zin.extractall(tmpdir)
+
+        cover_targets = [
+            p
+            for p in tmpdir.rglob("*")
+            if p.is_file() and "cover" in p.name.lower() and p.suffix.lower() in {".jpg", ".jpeg", ".png"}
+        ]
+        if not cover_targets:
+            raise RuntimeError("EPUB 内未找到可替换的 cover 图片，请改用 --format azw3 转换")
+
+        for target in cover_targets:
+            shutil.copy2(cover, target)
+
+        out = path.with_suffix(path.suffix + ".__tmp__")
+        with zipfile.ZipFile(out, "w") as zout:
+            mimetype = tmpdir / "mimetype"
+            if mimetype.exists():
+                zout.write(mimetype, "mimetype", compress_type=zipfile.ZIP_STORED)
+            for item in sorted(tmpdir.rglob("*")):
+                if item.is_file() and item.name != "mimetype":
+                    arc = item.relative_to(tmpdir).as_posix()
+                    zout.write(item, arc, compress_type=zipfile.ZIP_DEFLATED)
+        out.replace(path)
+
+
+def validate_bookfere_output(path: Path, *, asin: Optional[str] = None) -> BookInfo:
+    """修复后强制校验，不满足书伴 EBOK 标准则抛错，避免部署损坏文件。"""
+    info = analyze_book(path)
+    errors: list[str] = []
+    if info.format != "azw3":
+        errors.append(f"输出格式应为 azw3，当前为 {info.format}")
+    if not info.has_cover:
+        errors.append("缺少嵌入封面")
+    if not info.asin:
+        errors.append("缺少 ASIN 元数据")
+    elif asin and info.asin != asin:
+        errors.append(f"ASIN 不匹配：期望 {asin}，实际 {info.asin}")
+    if info.cde_type != "EBOK":
+        errors.append(f"cdeType 应为 EBOK，当前为 {info.cde_type or '未知'}（切勿改为 PDOC）")
+    if info.cover_offset in (None, INVALID_OFFSET):
+        errors.append("CoverOffset 元数据缺失")
+    if errors:
+        raise RuntimeError("修复结果验证失败：" + "；".join(errors))
+    return info
+
+
+def cleanup_kindle_artifacts(docs: Path, stem: str, *, asin: Optional[str] = None) -> list[str]:
+    """删除 Kindle documents 下同书的旧副本与 .sdr 缓存。"""
+    removed: list[str] = []
+    if not docs.exists():
+        return removed
+
+    for item in list(docs.iterdir()):
+        if item.name.startswith("._"):
+            continue
+        hit = item.stem == stem or item.name.startswith(stem)
+        if asin and asin in item.name:
+            hit = True
+        if not hit:
+            continue
+        if item.suffix.lower() in BOOK_EXTENSIONS or item.name.endswith(".sdr"):
+            if item.is_dir():
+                shutil.rmtree(item)
+            else:
+                item.unlink(missing_ok=True)
+            removed.append(item.name)
+    return removed
+
+
+def deploy_to_kindle(
+    fixed: Path,
+    *,
+    kindle_docs: Path = KINDLE_DOCS,
+    kindle_root: Path = KINDLE_ROOT,
+    recover_thumbnails: bool = True,
+) -> Path:
+    """标准部署：校验 → 清理旧缓存 → 复制 AZW3 → 修复系统缩略图。"""
+    if not kindle_docs.exists():
+        raise RuntimeError(f"未找到 Kindle documents：{kindle_docs}，请用 USB 连接设备")
+
+    pre = analyze_book(fixed)
+    info = validate_bookfere_output(fixed, asin=pre.asin)
+    stem = fixed.stem
+
+    for name in cleanup_kindle_artifacts(kindle_docs, stem, asin=info.asin):
+        print(f"  ✓ 已清理 Kindle 旧文件：{name}")
+
+    dest = kindle_docs / fixed.name
+    shutil.copy2(fixed, dest)
+    print(f"  ✓ 已复制到 Kindle：{dest.name}")
+
+    thumbnails = kindle_root / "system" / "thumbnails"
+    if recover_thumbnails and thumbnails.exists():
+        try:
+            run_bookfere_recover(kindle_root, action="fix")
+            print("  ✓ 已修复 Kindle 系统缩略图")
+        except Exception as exc:
+            print(f"  ! 缩略图修复跳过：{exc}")
+
+    return dest
+
+
+def set_epub_cover(path: Path, cover: Path) -> None:
+    set_epub_cover_safe(path, cover)
 
 
 def fix_book(
@@ -514,7 +626,15 @@ def fix_book(
     output_dir: Optional[Path] = None,
     backup: bool = True,
     target_format: Optional[str] = None,
+    validate: bool = True,
 ) -> Path:
+    # 锁屏封面与书库封面统一走书伴 EBOK 方案（切勿改为 PDOC）
+    if for_screensaver:
+        bookfere_ebok = True
+
+    if bookfere_ebok and not asin:
+        raise RuntimeError("书伴 EBOK 方案必须提供亚马逊 ASIN（--asin 或 --auto-asin）")
+
     info = analyze_book(path)
     work_path = path
     created_temp = False
@@ -595,7 +715,7 @@ def fix_book(
             work_path = out
             info.format = "mobi"
         elif normalized and info.format == "epub":
-            set_epub_cover(work_path, normalized)
+            set_epub_cover_safe(work_path, normalized)
         elif normalized:
             apply_cover_calibre(work_path, normalized)
 
@@ -619,7 +739,7 @@ def fix_book(
         else:
             patched = patch_mobi_metadata(work_path, cde_type="PDOC", ensure_asin=True)
             if not patched and for_screensaver:
-                print("  ℹ 已使用 Calibre --share-not-sync 转换（不再强行写入 PDOC，避免损坏文件）")
+                print("  ℹ 未使用书伴 EBOK 方案；侧载书建议加 --bookfere-ebok --asin")
 
     if backup and work_path.resolve() == path.resolve():
         backup_path = path.with_suffix(path.suffix + ".bak")
@@ -627,9 +747,13 @@ def fix_book(
             shutil.copy2(path, backup_path)
             print(f"  ✓ 已备份原文件：{backup_path.name}")
 
-    final_info = analyze_book(work_path)
-    if for_screensaver and not final_info.screensaver_ready:
-        print("  ! 已尽力修复，但可能仍需在 Kindle 上重新同步或重启设备")
+    if bookfere_ebok and validate:
+        final_info = validate_bookfere_output(work_path, asin=asin)
+        print(f"  ✓ 验证通过：EBOK + {final_info.asin} + 封面已嵌入")
+    else:
+        final_info = analyze_book(work_path)
+        if for_screensaver and not final_info.bookfere_ready:
+            print("  ! 未达书伴 EBOK 标准，请使用 --bookfere-ebok --asin")
     return work_path
 
 
@@ -680,6 +804,9 @@ def cmd_fix(args: argparse.Namespace) -> int:
         print(f"文件不存在：{path}", file=sys.stderr)
         return 1
 
+    if path.suffix.lower() == ".epub" and not args.bookfere_ebok:
+        print("  ! EPUB 建议改用 process 命令或加 --bookfere-ebok --asin（将转为 AZW3）", file=sys.stderr)
+
     output_dir = Path(args.output).expanduser().resolve() if args.output else None
     cover = Path(args.cover).expanduser().resolve() if args.cover else None
 
@@ -707,9 +834,70 @@ def cmd_fix(args: argparse.Namespace) -> int:
             output_dir=output_dir,
             backup=not args.no_backup,
             target_format=args.format,
+            validate=args.bookfere_ebok,
         )
+        if args.deploy:
+            if not args.bookfere_ebok:
+                print("  ✗ --deploy 需配合 --bookfere-ebok", file=sys.stderr)
+                return 1
+            deploy_to_kindle(result)
     except Exception as exc:
         print(f"修复失败：{exc}", file=sys.stderr)
+        return 1
+
+    print(f"完成：{result}")
+    print_kindle_tips()
+    return 0
+
+
+def cmd_process(args: argparse.Namespace) -> int:
+    """标准一站式流程：EBOK 修复 → 验证 → 可选部署到 Kindle。"""
+    path = Path(args.path).expanduser().resolve()
+    if not path.exists():
+        print(f"文件不存在：{path}", file=sys.stderr)
+        return 1
+
+    output_dir = Path(args.output).expanduser().resolve() if args.output else Path(__file__).resolve().parent / "output" / "processed"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    asin = args.asin
+    if not asin and args.auto_asin:
+        from asin_lookup import lookup_asin_for_book
+
+        lookup = lookup_asin_for_book(path, verify_cover=True)
+        asin = lookup.asin
+        if asin:
+            print(f"  ✓ 自动找到 ASIN={asin}（{lookup.source}）")
+        else:
+            print("  ✗ 未能自动找到 ASIN", file=sys.stderr)
+            return 1
+    if not asin:
+        print("  ✗ 必须提供 ASIN（--asin 或 --auto-asin）", file=sys.stderr)
+        return 1
+
+    print(f"正在处理：{path.name}")
+    try:
+        result = fix_book(
+            path,
+            bookfere_ebok=True,
+            asin=asin,
+            fetch_cover=True,
+            output_dir=output_dir,
+            backup=not args.no_backup,
+            target_format="azw3" if path.suffix.lower() in {".epub", ".mobi", ".azw"} else None,
+            validate=True,
+        )
+        target = output_dir / f"{path.stem}.azw3"
+        if result.resolve() != target.resolve():
+            if target.exists():
+                target.unlink()
+            result.rename(target)
+            result = target
+
+        if args.deploy:
+            deploy_to_kindle(result)
+    except Exception as exc:
+        print(f"处理失败：{exc}", file=sys.stderr)
         return 1
 
     print(f"完成：{result}")
@@ -823,7 +1011,17 @@ def build_parser() -> argparse.ArgumentParser:
     fix.add_argument("--format", choices=["azw3", "epub", "mobi"], help="强制输出格式")
     fix.add_argument("--output", help="输出目录（默认原地修改）")
     fix.add_argument("--no-backup", action="store_true", help="不创建 .bak 备份")
+    fix.add_argument("--deploy", action="store_true", help="修复后部署到 Kindle documents（需 --bookfere-ebok）")
     fix.set_defaults(func=cmd_fix)
+
+    process = sub.add_parser("process", help="标准流程：EBOK 修复 + 验证 + 可选部署 Kindle")
+    process.add_argument("path", help="电子书文件路径")
+    process.add_argument("--asin", help="亚马逊 ASIN")
+    process.add_argument("--auto-asin", action="store_true", help="自动查找 ASIN")
+    process.add_argument("--output", help="输出目录（默认 output/processed）")
+    process.add_argument("--deploy", action="store_true", help="修复后部署到 Kindle documents")
+    process.add_argument("--no-backup", action="store_true", help="不创建 .bak 备份")
+    process.set_defaults(func=cmd_process)
 
     fix_all = sub.add_parser("fix-all", help="批量修复文件夹内书籍")
     fix_all.add_argument("path", help="文件夹路径")

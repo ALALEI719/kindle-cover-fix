@@ -52,26 +52,33 @@ pip install -r requirements.txt
 
 ## 快速开始
 
-### 1. 修复单本书
+### 1. 标准流程（推荐，一键修复 + 部署）
+
+```bash
+python3 kindle_cover_fix.py process "某书.epub" --auto-asin --deploy
+```
+
+自动完成：查 ASIN → 转 AZW3 → EBOK 嵌封面 → 验证 → 清理 Kindle 缓存 → 复制到 `documents` → 修复系统缩略图。
+
+### 2. 修复单本书（手动指定 ASIN）
 
 ```bash
 python3 kindle_cover_fix.py fix "Recursion.azw3" \
   --bookfere-ebok \
   --asin B07HDSHP7N \
   --fetch-cover \
-  --output ./output/fixed
-
-cp "./output/fixed/Recursion.azw3" "/Volumes/Kindle/documents/"
+  --output ./output/fixed \
+  --deploy
 ```
 
-### 2. 快捷脚本
+### 3. 快捷脚本
 
 ```bash
 chmod +x kindle-cover-fix.sh
-./kindle-cover-fix.sh fix "某书.azw3" --bookfere-ebok --asin B0XXXX --fetch-cover --output ./output/fixed
+./kindle-cover-fix.sh process "某书.epub" --auto-asin --deploy
 ```
 
-### 3. 可视化界面
+### 4. 可视化界面
 
 ```bash
 ./run-app.sh
@@ -93,8 +100,9 @@ python3 batch_kindle_deploy.py
 
 | 命令 | 作用 |
 |------|------|
-| `scan <路径>` | 检查封面 / ASIN / 锁屏就绪状态 |
-| `fix <文件> --bookfere-ebok --asin B0XX --fetch-cover` | 修复单本（EBOK 方案） |
+| `process <文件> --auto-asin --deploy` | **推荐** 标准一站式流程 |
+| `scan <路径>` | 检查封面 / ASIN / 书伴就绪状态 |
+| `fix <文件> --bookfere-ebok --asin B0XX --fetch-cover --deploy` | 修复单本（EBOK 方案） |
 | `fix-all <文件夹> ...` | 批量修复文件夹 |
 | `batch_kindle_deploy.py` | 按日期筛选 Kindle 书籍并自动部署 |
 
@@ -102,10 +110,19 @@ python3 batch_kindle_deploy.py
 
 | 参数 | 说明 |
 |------|------|
-| `--bookfere-ebok` | **必用** 书伴 EBOK 方案 |
+| `--bookfere-ebok` | **必用** 书伴 EBOK 方案（切勿改为 PDOC） |
 | `--asin B0XXXX` | 亚马逊真实 ASIN |
 | `--fetch-cover` | 从亚马逊下载官方封面 |
+| `--deploy` | 修复后自动部署到 Kindle（清理 .sdr + 修复缩略图） |
 | `--output 目录` | 输出到新目录，不覆盖原文件 |
+
+### `process` 参数
+
+| 参数 | 说明 |
+|------|------|
+| `--auto-asin` | 自动查找 ASIN（推荐） |
+| `--deploy` | 修复验证通过后部署到 Kindle |
+| `--output 目录` | 输出目录（默认 `output/processed`） |
 
 ---
 
@@ -114,8 +131,10 @@ python3 batch_kindle_deploy.py
 1. 查亚马逊 **真实 ASIN**
 2. 下载官方封面：`https://m.media-amazon.com/images/P/{ASIN}.01.MAIN._SCRM_.jpg`
 3. Calibre 嵌入封面
-4. 元数据设为 **EBOK** + ASIN
-5. USB 复制到 `documents`
+4. 元数据设为 **EBOK** + ASIN（**不要** 改为 PDOC，会导致封面不显示）
+5. 修复后强制验证（格式、ASIN、封面、CoverOffset）
+6. USB 复制到 `documents`，并清理旧 `.sdr` 缓存
+7. 运行书伴工具修复 `system/thumbnails` 缩略图
 
 修复后：
 
@@ -147,9 +166,9 @@ https://www.amazon.com/dp/B07HDSHP7N
 
 ## 常见问题
 
-**修复后仍无封面？** 确认 Wi-Fi 已开、ASIN 正确、读几页后重启 Kindle 再试。
+**修复后仍无封面？** 确认使用 `process --deploy` 标准流程；Wi-Fi 已开、ASIN 正确；读几页后重启 Kindle。检查是否误用了 PDOC。
 
-**EPUB 能直接放进 Kindle 吗？** 不建议。请用本工具修成 AZW3 再放入。
+**EPUB 能直接放进 Kindle 吗？** 不能。请用 `process` 命令转为 AZW3 并修复后再部署。
 
 **会改原文件吗？** 使用 `--output` 时原文件不动；`batch_kindle_deploy.py` 会把旧文件剪切到 `output/kindle-batch-backup/`。
 

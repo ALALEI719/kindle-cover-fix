@@ -35,6 +35,7 @@ ASIN_OVERRIDES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"法治的细节", re.I), "B09L12881X"),
     (re.compile(r"咸的玩笑"), "B0G8L698LN"),
     (re.compile(r"耶路撒冷三千年", re.I), "B004LROX8S"),
+    (re.compile(r"Empire of Pain", re.I), "B08ND91K6G"),
 ]
 
 

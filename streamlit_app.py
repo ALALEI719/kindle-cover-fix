@@ -10,7 +10,7 @@ from pathlib import Path
 import streamlit as st
 
 from asin_lookup import AsinLookupResult, lookup_asin_for_book
-from kindle_cover_fix import find_calibre_tool, fix_book
+from kindle_cover_fix import deploy_to_kindle, find_calibre_tool, fix_book, validate_bookfere_output
 
 ROOT = Path(__file__).resolve().parent
 OUTPUT_DIR = ROOT / "output" / "streamlit-fixed"
@@ -51,16 +51,8 @@ def lookup_uploaded_book(uploaded) -> AsinLookupResult:
         return lookup_asin_for_book(src, verify_cover=True)
 
 
-def deploy_to_kindle(fixed: Path) -> Path:
-    if not kindle_mounted():
-        raise RuntimeError("未检测到 Kindle，请用 USB 连接设备（/Volumes/Kindle）")
-    dest = KINDLE_DOCS / fixed.name
-    if dest.exists():
-        backup = dest.with_suffix(dest.suffix + ".bak")
-        if not backup.exists():
-            shutil.move(str(dest), str(backup))
-    shutil.copy2(fixed, dest)
-    return dest
+def deploy_to_kindle_device(fixed: Path) -> Path:
+    return deploy_to_kindle(fixed, kindle_docs=KINDLE_DOCS)
 
 
 def tab_fix() -> None:
@@ -135,7 +127,7 @@ def tab_fix() -> None:
                     backup=False,
                 )
                 # 尽量保持上传时的文件名（扩展名可能变为 .azw3）
-                target_name = Path(uploaded.name).stem + fixed.suffix.lower()
+                target_name = Path(uploaded.name).stem + ".azw3"
                 final_path = OUTPUT_DIR / target_name
                 if fixed.resolve() != final_path.resolve():
                     if final_path.exists():
@@ -143,9 +135,10 @@ def tab_fix() -> None:
                     fixed.rename(final_path)
                     fixed = final_path
 
-                progress.progress(70, text="修复完成")
+                validate_bookfere_output(fixed, asin=asin)
+                progress.progress(70, text="验证通过")
                 if deploy:
-                    deployed = deploy_to_kindle(fixed)
+                    deployed = deploy_to_kindle_device(fixed)
                     progress.progress(100, text="已复制到 Kindle")
                     st.success(f"已部署到：{deployed}")
                 else:
