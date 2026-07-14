@@ -36,7 +36,6 @@ from typing import Iterable, Optional
 from urllib.parse import quote
 
 import requests
-from send_to_kindle import print_setup_instructions, send_book, validate_book_for_send
 from PIL import Image
 
 BOOK_EXTENSIONS = {".mobi", ".azw", ".azw3", ".epub", ".kfx"}
@@ -515,7 +514,6 @@ def fix_book(
     output_dir: Optional[Path] = None,
     backup: bool = True,
     target_format: Optional[str] = None,
-    send_to_kindle: bool = False,
 ) -> Path:
     info = analyze_book(path)
     work_path = path
@@ -549,17 +547,7 @@ def fix_book(
         normalized: Optional[Path] = None
         if cover_path and cover_path.exists():
             normalized = tmpdir / "cover_normalized.jpg"
-            if send_to_kindle:
-                # STK 个人文档缩略图对分辨率更敏感（社区验证 ≥1200×1800）
-                normalize_cover_image(
-                    cover_path,
-                    normalized,
-                    max_side=2000,
-                    min_height=1800,
-                    min_width=1200,
-                )
-            else:
-                normalize_cover_image(cover_path, normalized)
+            normalize_cover_image(cover_path, normalized)
             info.has_cover = True
 
         want_azw3 = (
@@ -645,126 +633,6 @@ def fix_book(
     return work_path
 
 
-def clean_title_for_metadata(title: str, authors: list[str]) -> str:
-    """避免书名变成「咸的玩笑 - 刘震云」这种文件名风格。"""
-    title = title.strip()
-    if not title or title.lower() == "book":
-        return title
-    if authors:
-        suffix = f" - {authors[0]}"
-        if title.endswith(suffix):
-            return title[: -len(suffix)].strip() or title
-    return title
-
-
-def upgrade_stk_document(
-    path: Path,
-    *,
-    asin: Optional[str] = None,
-    fetch_cover: bool = True,
-) -> Path:
-    """将 Send to Kindle 送达的 PDOC 书就地升级为 EBOK（需 Kindle USB 连接）。"""
-    info = analyze_book(path)
-    if info.cde_type == "EBOK" and info.asin and info.asin.startswith("B"):
-        print(f"  ℹ 已是 EBOK（ASIN={info.asin}），跳过")
-        return path
-    if not asin:
-        from asin_lookup import lookup_asin_for_book
-
-        lookup = lookup_asin_for_book(path, verify_cover=False)
-        asin = lookup.asin
-        if asin:
-            print(f"  ✓ 自动找到 ASIN={asin}（{lookup.source}）")
-    if not asin:
-        raise ValueError("未找到亚马逊 ASIN，请用 --asin 手动指定")
-    return fix_book(
-        path,
-        fetch_cover=fetch_cover,
-        bookfere_ebok=True,
-        asin=asin,
-        backup=True,
-    )
-
-
-def fix_for_send_to_kindle(
-    path: Path,
-    *,
-    cover: Optional[Path] = None,
-    asin: Optional[str] = None,
-    output_dir: Optional[Path] = None,
-    backup: bool = True,
-) -> Path:
-    """Send to Kindle 专用修复：高清封面 + EPUB 元数据 + 中文友好文件名。"""
-    seed_title, seed_authors = extract_metadata_calibre(path)
-    if not seed_title:
-        seed_title = path.stem
-
-    work_path = fix_book(
-        path,
-        cover=cover,
-        fetch_cover=True,
-        for_screensaver=False,
-        asin=asin,
-        output_dir=output_dir,
-        backup=backup,
-        target_format="epub",
-        bookfere_ebok=False,
-        bookfere_mobi=False,
-        send_to_kindle=True,
-    )
-
-    title, authors = extract_metadata_calibre(work_path)
-    if not title or title.lower() == "book":
-        title = seed_title
-    if not authors:
-        authors = seed_authors
-    title = clean_title_for_metadata(title, authors)
-    apply_metadata_calibre(work_path, title, authors)
-
-    send_name = build_send_filename(title, authors, work_path.suffix.lower())
-    send_path = work_path.with_name(send_name)
-    if send_path.resolve() != work_path.resolve():
-        if send_path.exists():
-            send_path.unlink()
-        work_path.rename(send_path)
-        work_path = send_path
-
-    print(f"  ✓ STK 待发文件：{work_path.name}")
-    return work_path
-
-
-def cmd_diagnose_send(_: argparse.Namespace) -> int:
-    from send_to_kindle import diagnose_send_setup
-
-    print("Send to Kindle 诊断")
-    print("=" * 40)
-    for line in diagnose_send_setup():
-        print(line)
-    return 0
-
-
-def cmd_setup_send(_: argparse.Namespace) -> int:
-    from send_to_kindle import write_example_config
-
-    write_example_config()
-    print_setup_instructions()
-    return 0
-
-
-def cmd_send(args: argparse.Namespace) -> int:
-    path = Path(args.path).expanduser().resolve()
-    try:
-        validate_book_for_send(path)
-        message = send_book(path, subject=args.subject)
-    except Exception as exc:
-        print(f"发送失败：{exc}", file=sys.stderr)
-        print("请先运行：python3 kindle_cover_fix.py setup-send", file=sys.stderr)
-        return 1
-    print(message)
-    print_send_to_kindle_tips()
-    return 0
-
-
 def cmd_scan(args: argparse.Namespace) -> int:
     root = Path(args.path).expanduser().resolve()
     if not root.exists():
@@ -806,47 +674,17 @@ def cmd_recover(args: argparse.Namespace) -> int:
         return 1
 
 
-def cmd_upgrade(args: argparse.Namespace) -> int:
-    path = Path(args.path).expanduser().resolve()
-    if not path.exists():
-        print(f"文件不存在：{path}", file=sys.stderr)
-        return 1
-    print(f"正在升级 STK 书籍：{path.name}")
-    try:
-        result = upgrade_stk_document(path, asin=args.asin, fetch_cover=not args.no_fetch_cover)
-    except Exception as exc:
-        print(f"升级失败：{exc}", file=sys.stderr)
-        return 1
-    print(f"完成：{result}")
-    print_upgrade_tips()
-    return 0
-
-
-def print_upgrade_tips() -> None:
-    print("\n--- Kindle 端检查清单 ---")
-    print("1. 安全弹出 Kindle 后重新插上，或重启 Kindle")
-    print("2. 保持 Wi-Fi 开启，打开该书读几页")
-    print("3. 回书库查看封面；锁屏测试「显示封面」")
-
-
 def cmd_fix(args: argparse.Namespace) -> int:
     path = Path(args.path).expanduser().resolve()
     if not path.exists():
         print(f"文件不存在：{path}", file=sys.stderr)
         return 1
 
-    if args.send_to_kindle and args.bookfere_ebok:
-        print(
-            "⚠ Send to Kindle 会把书标为个人文档 PDOC，与 --bookfere-ebok 冲突。"
-            "已自动改用「嵌入式高清封面 + AZW3」方案。",
-            file=sys.stderr,
-        )
-
     output_dir = Path(args.output).expanduser().resolve() if args.output else None
     cover = Path(args.cover).expanduser().resolve() if args.cover else None
 
     asin = args.asin
-    if not asin and (args.auto_asin or args.send_to_kindle):
+    if not asin and args.auto_asin:
         from asin_lookup import lookup_asin_for_book
 
         lookup = lookup_asin_for_book(path, verify_cover=False)
@@ -858,50 +696,23 @@ def cmd_fix(args: argparse.Namespace) -> int:
 
     print(f"正在修复：{path.name}")
     try:
-        if args.send_to_kindle:
-            result = fix_for_send_to_kindle(
-                path,
-                cover=cover,
-                asin=asin,
-                output_dir=output_dir,
-                backup=not args.no_backup,
-            )
-        else:
-            result = fix_book(
-                path,
-                cover=cover,
-                fetch_cover=args.fetch_cover or bool(asin),
-                for_screensaver=args.for_screensaver,
-                bookfere_ebok=args.bookfere_ebok,
-                bookfere_mobi=args.bookfere_mobi,
-                asin=asin,
-                output_dir=output_dir,
-                backup=not args.no_backup,
-                target_format=args.format,
-            )
+        result = fix_book(
+            path,
+            cover=cover,
+            fetch_cover=args.fetch_cover or bool(asin),
+            for_screensaver=args.for_screensaver,
+            bookfere_ebok=args.bookfere_ebok,
+            bookfere_mobi=args.bookfere_mobi,
+            asin=asin,
+            output_dir=output_dir,
+            backup=not args.no_backup,
+            target_format=args.format,
+        )
     except Exception as exc:
         print(f"修复失败：{exc}", file=sys.stderr)
         return 1
 
     print(f"完成：{result}")
-
-    if args.send_to_kindle:
-        try:
-            title, authors = extract_metadata_calibre(result)
-            message = send_book(
-                result,
-                subject=args.send_subject or title or result.stem,
-                title=title or result.stem,
-                author=authors[0] if authors else None,
-            )
-            print(message)
-            print_send_to_kindle_tips()
-        except Exception as exc:
-            print(f"修复成功，但 Send to Kindle 发送失败：{exc}", file=sys.stderr)
-            print(f'可手动发送：python3 kindle_cover_fix.py send "{result}"', file=sys.stderr)
-            return 1
-        return 0
-
     print_kindle_tips()
     return 0
 
@@ -943,19 +754,6 @@ def cmd_fix_all(args: argparse.Namespace) -> int:
     print(f"\n完成：修复 {fixed} 本，跳过 {skipped} 本。")
     print_kindle_tips()
     return 0
-
-
-def print_send_to_kindle_tips() -> None:
-    print(
-        """
---- Send to Kindle 后续步骤 ---
-1. 确保 Kindle 已联网（Wi-Fi 开启）
-2. 1-5 分钟后在「图书馆」或「个人文档」中查看
-3. 若封面仍空白：打开该书读几页，等待索引完成后再看
-4. 锁屏「显示封面」对个人文档支持有限，书店购买的书效果更好
-5. 若需要书库 + 锁屏封面都完美：请改用 USB 复制（--bookfere-ebok 方案）
-"""
-    )
 
 
 def print_kindle_tips() -> None:
@@ -1025,33 +823,7 @@ def build_parser() -> argparse.ArgumentParser:
     fix.add_argument("--format", choices=["azw3", "epub", "mobi"], help="强制输出格式")
     fix.add_argument("--output", help="输出目录（默认原地修改）")
     fix.add_argument("--no-backup", action="store_true", help="不创建 .bak 备份")
-    fix.add_argument(
-        "--send-to-kindle",
-        action="store_true",
-        help="修复后通过 Send to Kindle 邮件发送到设备（需先 setup-send）",
-    )
-    fix.add_argument("--send-subject", help="Send to Kindle 邮件主题（默认用书文件名）")
     fix.set_defaults(func=cmd_fix)
-
-    send = sub.add_parser("send", help="把已修复的电子书发送到 Kindle（Send to Kindle 邮件）")
-    send.add_argument("path", help="电子书文件路径")
-    send.add_argument("--subject", help="邮件主题（默认用书文件名）")
-    send.set_defaults(func=cmd_send)
-
-    setup_send = sub.add_parser("setup-send", help="生成 Send to Kindle 配置文件并显示设置说明")
-    setup_send.set_defaults(func=cmd_setup_send)
-
-    diagnose_send = sub.add_parser("diagnose-send", help="检查 Send to Kindle 配置与常见收不到书的原因")
-    diagnose_send.set_defaults(func=cmd_diagnose_send)
-
-    upgrade = sub.add_parser(
-        "upgrade",
-        help="将 Kindle documents 里 STK 送达的 PDOC 书就地升级为 EBOK（需 USB 连接）",
-    )
-    upgrade.add_argument("path", help="Kindle documents 中的 .azw3 文件路径")
-    upgrade.add_argument("--asin", help="亚马逊 ASIN")
-    upgrade.add_argument("--no-fetch-cover", action="store_true", help="不重新下载封面")
-    upgrade.set_defaults(func=cmd_upgrade)
 
     fix_all = sub.add_parser("fix-all", help="批量修复文件夹内书籍")
     fix_all.add_argument("path", help="文件夹路径")
