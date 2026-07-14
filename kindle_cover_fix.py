@@ -553,7 +553,7 @@ def fix_book(
         want_azw3 = (
             for_screensaver
             or target_format == "azw3"
-            or (bookfere_ebok and work_path.suffix.lower() in {".azw3", ".azw"})
+            or (bookfere_ebok and work_path.suffix.lower() in {".azw3", ".azw", ".epub"})
         )
         want_epub = target_format == "epub"
         want_mobi = bookfere_mobi or target_format == "mobi" or (
